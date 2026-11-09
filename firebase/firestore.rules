@@ -1,0 +1,208 @@
+rules_version = '2';
+
+// Regras de segurança da Rota (fase 1: uso próprio, modo individual).
+//
+// A proteção dos dados é garantida aqui, no servidor, e não pelo app:
+// mesmo quem tiver o código do app não consegue ler dados de outra pessoa.
+// Os testes em tests/rules tentam furar estas regras a cada mudança.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function changedOnly(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    function isDay(v) {
+      return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function text(v, max) {
+      return v is string && v.size() <= max;
+    }
+
+    function money(v) {
+      return v is number && v >= 0 && v <= 1000000;
+    }
+
+    function stamped() {
+      return request.resource.data.updatedAt == request.time;
+    }
+
+    // ---------------------------------------------------------------- users
+    // Criado só pelo servidor (função completeRegistration), que valida o CPF,
+    // garante que ele é único e guarda o número criptografado. O app nunca
+    // escreve CPF: só lê a versão mascarada.
+    match /users/{uid} {
+      allow read: if isUser(uid);
+      allow create, delete: if false;
+      allow update: if isUser(uid)
+        && changedOnly(['name', 'phone', 'jobTitle', 'plate', 'mode', 'settings', 'onboardingDone', 'updatedAt'])
+        && text(request.resource.data.name, 120) && request.resource.data.name.size() >= 3
+        && text(request.resource.data.phone, 30)
+        && text(request.resource.data.jobTitle, 80)
+        && text(request.resource.data.plate, 10)
+        // "company" só é ligado pelo servidor, quando a empresa aprova (fase 3).
+        && request.resource.data.mode in ['undecided', 'individual']
+        && request.resource.data.settings is map
+        && request.resource.data.settings.categories is list
+        && request.resource.data.settings.categories.size() <= 40
+        && request.resource.data.onboardingDone is bool
+        && stamped();
+
+      // Dados bancários e Pix (fase 2): só o próprio usuário.
+      match /bankAccounts/{accountId} {
+        allow read, write: if isUser(uid);
+      }
+
+      // CPF criptografado e afins: só o servidor.
+      match /private/{doc} {
+        allow read, write: if false;
+      }
+    }
+
+    // Índice de CPFs (hash), usado pelo servidor para garantir 1 conta por CPF.
+    match /cpfIndex/{hash} {
+      allow read, write: if false;
+    }
+
+    // ------------------------------------------------------------- expenses
+    // O dono lê e escreve até o relatório ser fechado. A empresa só verá a
+    // despesa depois do envio (fase 3).
+    function validExpense(d) {
+      return d.keys().hasOnly([
+          'ownerId', 'companyId', 'date', 'client', 'activity', 'categoryId', 'noteAmount', 'amount',
+          'splitPeople', 'notes', 'vehicleNotes', 'merchant', 'receipt', 'source', 'reportId',
+          'projectId', 'localCreatedAt', 'createdAt', 'updatedAt'])
+        && d.ownerId == request.auth.uid
+        && d.companyId == null
+        && isDay(d.date)
+        && text(d.client, 120) && d.client.size() > 0
+        && text(d.activity, 200)
+        && text(d.categoryId, 60)
+        && money(d.noteAmount)
+        && money(d.amount)
+        && d.splitPeople is int && d.splitPeople >= 1 && d.splitPeople <= 50
+        && text(d.notes, 1000)
+        && text(d.vehicleNotes, 500)
+        && text(d.merchant, 200)
+        && d.receipt is map
+        && d.receipt.state in ['none', 'local', 'uploaded']
+        && d.source in ['camera', 'gallery', 'manual', 'pdf', 'nfe']
+        && (d.projectId == null || text(d.projectId, 60));
+    }
+
+    function reportPath(id) {
+      return /databases/$(database)/documents/reports/$(id);
+    }
+
+    // Ao fechar o período, o app grava o relatório e marca as despesas no
+    // mesmo lote. A despesa só pode ir para um relatório do próprio dono
+    // que a liste.
+    function closingInto(reportId, expenseId) {
+      return existsAfter(reportPath(reportId))
+        && getAfter(reportPath(reportId)).data.ownerId == request.auth.uid
+        && expenseId in getAfter(reportPath(reportId)).data.expenseIds;
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
+
+      allow create: if signedIn()
+        && validExpense(request.resource.data)
+        && request.resource.data.reportId == null
+        && request.resource.data.createdAt == request.time
+        && stamped();
+
+      allow update: if signedIn()
+        && resource.data.ownerId == request.auth.uid
+        && validExpense(request.resource.data)
+        && stamped()
+        && (
+          // Edição livre enquanto aberta.
+          (resource.data.reportId == null && request.resource.data.reportId == null
+            && request.resource.data.createdAt == resource.data.createdAt)
+          // Fechamento: só muda o reportId.
+          || (resource.data.reportId == null && request.resource.data.reportId is string
+            && changedOnly(['reportId', 'updatedAt'])
+            && closingInto(request.resource.data.reportId, expenseId))
+          // Depois de fechada, a foto que estava só no celular pode terminar de subir.
+          || (resource.data.reportId != null
+            && changedOnly(['receipt', 'updatedAt'])
+            && resource.data.receipt.state == 'local'
+            && request.resource.data.receipt.state == 'uploaded'
+            && request.resource.data.receipt.path == resource.data.receipt.path)
+        );
+
+      allow delete: if signedIn()
+        && resource.data.ownerId == request.auth.uid
+        && resource.data.reportId == null;
+    }
+
+    // -------------------------------------------------------------- reports
+    function validReport(d) {
+      return d.keys().hasOnly([
+          'ownerId', 'companyId', 'mode', 'periodStart', 'periodEnd', 'expenseIds', 'subtotal',
+          'advances', 'total', 'status', 'fileBaseName', 'files', 'createdAt', 'updatedAt'])
+        && d.ownerId == request.auth.uid
+        && d.companyId == null
+        && d.mode in ['period', 'project']
+        && isDay(d.periodStart) && isDay(d.periodEnd) && d.periodStart <= d.periodEnd
+        && d.expenseIds is list && d.expenseIds.size() >= 1 && d.expenseIds.size() <= 500
+        && money(d.subtotal) && money(d.advances)
+        && d.total is number
+        && text(d.fileBaseName, 200);
+    }
+
+    match /reports/{reportId} {
+      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
+
+      // Fase 1: o relatório do modo individual nasce emitido.
+      allow create: if signedIn()
+        && validReport(request.resource.data)
+        && request.resource.data.status == 'issued'
+        && stamped();
+
+      // Depois de emitido, só dá para registrar os arquivos gerados.
+      allow update: if signedIn()
+        && resource.data.ownerId == request.auth.uid
+        && changedOnly(['files', 'updatedAt'])
+        && request.resource.data.files is map
+        && stamped();
+
+      allow delete: if false;
+    }
+
+    // ------------------------------------------------------------- projects
+    // Fase 2. Já fica protegido: só o dono.
+    match /projects/{projectId} {
+      allow read: if signedIn() && resource.data.ownerId == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.ownerId == request.auth.uid;
+      allow update: if signedIn() && resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == request.auth.uid;
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+    }
+
+    // ------------------------------------------- empresa (fase 3) e servidor
+    // Tudo fechado até a fase 3. activationCodes e auditLog: só o servidor.
+    match /companies/{companyId}/{document=**} {
+      allow read, write: if false;
+    }
+    match /memberships/{membershipId} {
+      allow read, write: if false;
+    }
+    match /activationCodes/{codeId} {
+      allow read, write: if false;
+    }
+    match /auditLog/{entryId} {
+      allow read, write: if false;
+    }
+  }
+}

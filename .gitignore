@@ -1,0 +1,8 @@
+node_modules/
+functions/build/
+.emulator-data/
+*-debug.log
+*.log
+.DS_Store
+.idea/
+.vscode/

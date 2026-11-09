@@ -1,0 +1,44 @@
+rules_version = '2';
+
+// Fotos e arquivos: uma pasta por usuário, só o dono acessa.
+// Quando o envio para a empresa existir (fase 3), o servidor gera uma
+// cópia só de leitura para ela, fora desta pasta.
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isUser(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function expenseOpen(expenseId) {
+      return !firestore.exists(/databases/(default)/documents/expenses/$(expenseId))
+        || firestore.get(/databases/(default)/documents/expenses/$(expenseId)).data.reportId == null;
+    }
+
+    // users/{uid}/receipts/{expenseId}.jpg (ou .pdf / .xml)
+    match /users/{uid}/receipts/{fileName} {
+      allow read: if isUser(uid);
+
+      // Comprovante novo pode subir sempre (inclusive de despesa já fechada
+      // offline, cuja foto ainda não tinha subido). Trocar ou apagar, só
+      // enquanto a despesa estiver aberta.
+      allow write: if isUser(uid)
+        && (request.resource == null || (
+          request.resource.size < 15 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp|heic|heif)|application/pdf|(application|text)/xml')))
+        && (resource == null || expenseOpen(fileName.split('[.]')[0]));
+    }
+
+    // users/{uid}/reports/{reportId}.pdf e .xlsx
+    match /users/{uid}/reports/{fileName} {
+      allow read: if isUser(uid);
+      allow write: if isUser(uid)
+        && request.resource.size < 60 * 1024 * 1024
+        && request.resource.contentType.matches('application/pdf|application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
