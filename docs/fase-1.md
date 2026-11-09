@@ -4,6 +4,15 @@ A fase 1 substitui a planilha da DJ PRIMUS no dia a dia: login, cadastro com CPF
 
 Ela roda no **simulador do Firebase** (Emulator Suite), no plano gratuito, com o projeto de demonstração `demo-rota`. Nada vai para a nuvem de verdade até você seguir a seção "Antes do primeiro uso real".
 
+## Atalho: scripts que fazem tudo
+
+| | Instalar (uma vez) | Abrir o app |
+|---|---|---|
+| **Windows** | dois cliques em `scripts\instalar-windows.bat` | dois cliques em `scripts\abrir-windows.bat` |
+| **Mac** | no Terminal: `bash scripts/instalar-mac.sh` | no Terminal: `bash scripts/abrir-mac.sh` |
+
+O instalador baixa Git, Node.js, Java 21, Chrome e Flutter (o que faltar) e prepara o projeto. O "abrir" liga o simulador e abre a Rota no Chrome. Os passos abaixo são o mesmo processo feito à mão.
+
 ## 1. Instalar uma vez
 
 - [Flutter](https://docs.flutter.dev/get-started/install) (canal stable)

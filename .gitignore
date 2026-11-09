@@ -6,3 +6,4 @@ functions/build/
 .DS_Store
 .idea/
 .vscode/
+emulador.log

@@ -45,7 +45,9 @@ docs/         Guias (comece por docs/fase-1.md)
 
 Veja **[docs/fase-1.md](docs/fase-1.md)**: como abrir o app no simulador, testar no celular pela versão web, rodar os testes e o que fazer antes do primeiro uso real.
 
-Atalhos (na raiz do repositório):
+Instalação automática: `scripts/instalar-windows.bat` ou `scripts/instalar-mac.sh`; depois `scripts/abrir-windows.bat` ou `scripts/abrir-mac.sh`.
+
+Testes (na raiz do repositório):
 
 ```bash
 npm install && npm --prefix functions install
